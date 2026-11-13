@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Intérprete EN→ES</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #0b0f14; color: #f2f5f8;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+  }
+  header { padding: 14px 0 8px; display: flex; flex-direction: column; gap: 10px; }
+  #btn {
+    width: 100%; border: 0; border-radius: 16px; padding: 20px;
+    font-size: 24px; font-weight: 700; color: #fff; background: #1f9d55;
+  }
+  #btn.on { background: #d64545; }
+  #btn:active { opacity: .85; }
+  #status { font-size: 15px; color: #8fa1b3; min-height: 20px; text-align: center; }
+  #error {
+    display: none; background: #3a1518; border: 1px solid #d64545; color: #ffd6d6;
+    border-radius: 12px; padding: 12px 14px; font-size: 16px; line-height: 1.4;
+  }
+  #out {
+    flex: 1; overflow-y: auto; padding: 8px 0 24px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .line {
+    font-size: clamp(26px, 7.2vw, 42px); line-height: 1.25; font-weight: 600;
+    color: #f2f5f8; overflow-wrap: anywhere;
+  }
+  .line.old { color: #6b7a89; font-weight: 500; font-size: clamp(20px, 5.4vw, 30px); }
+  #hint { color: #6b7a89; font-size: 18px; text-align: center; margin-top: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <button id="btn" type="button">Iniciar</button>
+  <div id="status">Listo. Toca Iniciar.</div>
+  <div id="error" role="alert"></div>
+</header>
+<main id="out" aria-live="polite">
+  <div id="hint">Aquí aparecerá la traducción.</div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const btn = $('btn'), statusEl = $('status'), errEl = $('error'), out = $('out');
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  // ---- Ajustes ----
+  const CHUNK_WORDS = 6;      // palabras estables mínimas para traducir un fragmento
+  const HOLD_WORDS = 2;       // últimas palabras que se retienen mientras son provisionales
+  const SILENCE_FLUSH_MS = 1000; // si no llega nada nuevo, se traduce lo pendiente
+  const MAX_LINES = 14;
+
+  // ---- Estado ----
+  let running = false;
+  let rec = null;
+  let recActive = false;
+  let restartTimer = null;
+  let restartDelay = 150;
+  let failCount = 0;
+  let startedThisSession = false;
+  let wakeLock = null;
+
+  let committed = 0;          // palabras ya enviadas a traducir en esta sesión de reconocimiento
+  let lastWords = [];
+  let flushTimer = null;
+
+  let orderChain = Promise.resolve();
+  const speakQueue = [];
+  let speaking = false;
+  let esVoice = null;
+  let transientError = false;
+
+  // ---- UI ----
+  function setStatus(t) { statusEl.textContent = t; }
+  function showError(t) { errEl.textContent = t; errEl.style.display = 'block'; }
+  function clearError() { errEl.style.display = 'none'; errEl.textContent = ''; }
+  function updateUI() {
+    btn.textContent = running ? 'Detener' : 'Iniciar';
+    btn.classList.toggle('on', running);
+  }
+
+  function showLine(text) {
+    const hint = $('hint');
+    if (hint) hint.remove();
+    out.querySelectorAll('.line:not(.old)').forEach((n) => n.classList.add('old'));
+    const d = document.createElement('div');
+    d.className = 'line';
+    d.textContent = text;           // siempre texto, nunca HTML
+    out.appendChild(d);
+    while (out.children.length > MAX_LINES) out.removeChild(out.firstChild);
+    out.scrollTop = out.scrollHeight;
+  }
+
+  // ---- Filtro rápido de español (el reconocimiento está fijado a en-US) ----
+  const ES_WORDS = new Set(['el','la','los','las','que','una','por','para','con','pero','muy','hola',
+    'gracias','buenos','días','dias','qué','yo','tú','mi','su','del','al','lo','más','está','esto',
+    'también','porque','cuando','donde','nosotros','ustedes','ellos','bueno','entonces','vale']);
+  function looksSpanish(t) {
+    if (/[¿¡áéíóúñü]/i.test(t)) return true;
+    const w = t.toLowerCase().split(/\s+/).filter(Boolean);
+    let n = 0;
+    for (const x of w) if (ES_WORDS.has(x)) n++;
+    return n >= 2 || (w.length > 0 && n / w.length >= 0.4);
+  }
+
+  // ---- Traducción (gratuita, sin clave) ----
+  async function fetchJSON(url, ms) {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), ms);
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } finally { clearTimeout(to); }
+  }
+
+  async function translate(text) {
+    if (looksSpanish(text)) return null;
+    // 1) Google Translate (endpoint público): rápido y detecta el idioma de origen
+    try {
+      const d = await fetchJSON(
+        'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q=' +
+        encodeURIComponent(text), 6000);
+      if (d && d[2] && d[2] !== 'en') return null;      // no es inglés: no hacer nada
+      const es = (d[0] || []).map((s) => s[0]).join('').trim();
+      if (es) { if (transientError) { clearError(); transientError = false; } return es; }
+    } catch (e) { /* pasa al respaldo */ }
+    // 2) Respaldo: MyMemory
+    try {
+      const d = await fetchJSON(
+        'https://api.mymemory.translated.net/get?langpair=en|es&q=' + encodeURIComponent(text), 7000);
+      const es = d && d.responseData && d.responseData.translatedText;
+      if (es && d.responseStatus === 200) {
+        if (transientError) { clearError(); transientError = false; }
+        return String(es).trim();
+      }
+    } catch (e) { /* sin servicio */ }
+    showError('No se pudo traducir: revisa tu conexión a internet. Sigo escuchando.');
+    transientError = true;
+    return null;
+  }
+
+  function enqueueChunk(text) {
+    text = text.trim();
+    if (!text) return;
+    const p = translate(text);   // se traducen en paralelo...
+    orderChain = orderChain      // ...pero se muestran y leen en orden
+      .then(() => p)
+      .then((es) => { if (es && running) { showLine(es); queueSpeech(es); } })
+      .catch(() => {});
+  }
+
+  // ---- Voz en español (cola) ----
+  function pickVoice() {
+    const vs = speechSynthesis.getVoices();
+    esVoice = vs.find((v) => /^es[-_]ES/i.test(v.lang)) || vs.find((v) => /^es/i.test(v.lang)) || null;
+  }
+  if ('speechSynthesis' in window) {
+    speechSynthesis.onvoiceschanged = pickVoice;
+    pickVoice();
+  }
+
+  function unlockSpeech() {
+    try {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+    } catch (e) {}
+  }
+
+  function queueSpeech(text) {
+    speakQueue.push(text);
+    if (!speaking) playNext();
+  }
+
+  function playNext() {
+    const t = speakQueue.shift();
+    if (!t) { speaking = false; return; }
+    speaking = true;
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = 'es-ES';
+    if (esVoice) u.voice = esVoice;
+    const n = speakQueue.length;                 // si hay cola, habla un poco más rápido
+    u.rate = n >= 4 ? 1.35 : n >= 2 ? 1.2 : n >= 1 ? 1.1 : 1.0;
+    let done = false;
+    const next = () => { if (done) return; done = true; clearTimeout(guard); playNext(); };
+    const guard = setTimeout(next, 4000 + t.length * 120);
+    u.onend = next;
+    u.onerror = next;
+    try { speechSynthesis.speak(u); } catch (e) { next(); }
+  }
+
+  // ---- Reconocimiento de voz ----
+  function flushAll() {
+    clearTimeout(flushTimer);
+    if (lastWords.length > committed) {
+      enqueueChunk(lastWords.slice(committed).join(' '));
+      committed = lastWords.length;
+    }
+  }
+
+  function onResult(ev) {
+    let full = '';
+    let allFinal = true;
+    for (let i = 0; i < ev.results.length; i++) {
+      full += ev.results[i][0].transcript + ' ';
+      if (!ev.results[i].isFinal) allFinal = false;
+    }
+    const words = full.trim().split(/\s+/).filter(Boolean);
+    lastWords = words;
+    if (words.length < committed) committed = 0;   // la lista se reinició
+
+    const pending = words.length - committed;
+    const stable = pending - (allFinal ? 0 : HOLD_WORDS);
+    if (stable >= CHUNK_WORDS || (allFinal && pending > 0)) {
+      const take = allFinal ? pending : stable;
+      enqueueChunk(words.slice(committed, committed + take).join(' '));
+      committed += take;
+    }
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushAll, SILENCE_FLUSH_MS);
+  }
+
+  function stopWithError(msg) {
+    showError(msg);
+    stop(true);
+  }
+
+  function onRecError(ev) {
+    const e = ev && ev.error;
+    if (e === 'not-allowed' || e === 'service-not-allowed') {
+      let m = 'El navegador no dio permiso al micrófono. Toca el candado junto a la dirección → Permisos → Micrófono → Permitir, y vuelve a tocar Iniciar.';
+      if (location.protocol === 'file:') {
+        m += ' Estás abriendo el archivo directamente del teléfono: publícalo en una dirección https (por ejemplo GitHub Pages) y ábrelo desde ahí.';
+      }
+      stopWithError(m);
+    } else if (e === 'audio-capture') {
+      stopWithError('No se detecta ningún micrófono. Revisa que los auriculares estén conectados y que ninguna otra app use el micrófono.');
+    } else if (e === 'language-not-supported') {
+      stopWithError('Este navegador no admite reconocimiento de voz en inglés (en-US).');
+    } else if (e === 'network') {
+      showError('El reconocimiento de voz no tiene conexión a internet. Reintentando…');
+      restartDelay = Math.min(restartDelay * 2, 4000);
+    }
+    // 'no-speech' y 'aborted' son normales: onend reinicia solo
+  }
+
+  function scheduleRestart() {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => { restartTimer = null; startRecognition(); }, restartDelay);
+  }
+
+  function startRecognition() {
+    if (!running) return;
+    clearTimeout(restartTimer);
+    restartTimer = null;
+    const r = new SR();
+    r.lang = 'en-US';
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+    committed = 0;
+    lastWords = [];
+    startedThisSession = false;
+
+    r.onstart = () => {
+      if (rec !== r) return;
+      recActive = true; startedThisSession = true; failCount = 0; restartDelay = 150;
+      if (errEl.textContent.indexOf('reconocimiento de voz') !== -1) clearError();
+      setStatus('Escuchando inglés…');
+    };
+    r.onresult = (ev) => { if (rec === r) onResult(ev); };
+    r.onerror = (ev) => { if (rec === r) onRecError(ev); };
+    r.onend = () => {
+      if (rec !== r) return;
+      recActive = false;
+      flushAll();
+      if (!running) return;
+      if (!startedThisSession) {
+        failCount++;
+        if (failCount >= 5) {
+          stopWithError('El reconocimiento de voz no logra arrancar. Cierra otras apps que usen el micrófono, comprueba el permiso y vuelve a intentarlo.');
+          return;
+        }
+        restartDelay = Math.min(restartDelay * 2, 3000);
+      }
+      scheduleRestart();
+    };
+
+    rec = r;
+    try {
+      r.start();
+    } catch (e) {
+      if (e && e.name === 'InvalidStateError') { scheduleRestart(); return; }
+      stopWithError('No se pudo iniciar el micrófono: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  // ---- Pantalla activa ----
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator && running && document.visibilityState === 'visible') {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } catch (e) { /* no crítico */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && running) {
+      if (!wakeLock) requestWakeLock();
+      if (!recActive && !restartTimer) startRecognition();
+    }
+  });
+
+  // Vigilante: si el reconocimiento se queda parado, lo reinicia
+  setInterval(() => {
+    if (running && !recActive && !restartTimer && document.visibilityState === 'visible') startRecognition();
+  }, 4000);
+
+  // ---- Iniciar / Detener ----
+  function start() {
+    clearError();
+    if (!SR) {
+      showError('Este navegador no admite reconocimiento de voz. Abre la página en Chrome para Android.');
+      return;
+    }
+    if (!window.isSecureContext) {
+      showError('La página debe abrirse desde una dirección https para poder usar el micrófono.');
+      return;
+    }
+    if (!('speechSynthesis' in window)) {
+      showError('Este navegador no puede leer en voz alta. Abre la página en Chrome para Android.');
+      return;
+    }
+    running = true;
+    failCount = 0; restartDelay = 150;
+    updateUI();
+    setStatus('Iniciando micrófono…');
+    unlockSpeech();                 // debe ocurrir dentro del toque del usuario
+    startRecognition();             // idem: sin esperas previas
+    requestWakeLock();
+    const vs = speechSynthesis.getVoices();
+    if (vs.length && !vs.some((v) => /^es/i.test(v.lang))) {
+      showError('No hay voz en español instalada en el teléfono; se usará la voz predeterminada.');
+    }
+  }
+
+  function stop(keepError) {
+    running = false;
+    clearTimeout(restartTimer); restartTimer = null;
+    clearTimeout(flushTimer);
+    const r = rec; rec = null; recActive = false;
+    try { if (r) r.abort(); } catch (e) {}
+    speakQueue.length = 0; speaking = false;
+    try { speechSynthesis.cancel(); } catch (e) {}
+    try { if (wakeLock) wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+    updateUI();
+    setStatus('Detenido.');
+    if (!keepError) clearError();
+  }
+
+  btn.addEventListener('click', () => { running ? stop() : start(); });
+  updateUI();
+})();
+</script>
+</body>
+</html>
