@@ -1,1 +1,315 @@
 
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Traductor EN → ES</title>
+<style>
+:root{--azul:#1a73e8;--azul-osc:#1558b0;--gris:#5f6368;--borde:#dadce0;--fondo:#f8f9fa;--rojo:#d93025;--verde:#188038}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:Roboto,Arial,sans-serif;background:var(--fondo);color:#202124;min-height:100vh;display:flex;flex-direction:column}
+header{background:#fff;border-bottom:1px solid var(--borde);padding:12px 16px;display:flex;align-items:center;gap:12px}
+header h1{font-size:20px;font-weight:400;margin:0;color:var(--gris)}
+header h1 b{color:var(--azul);font-weight:500}
+.icono{width:32px;height:32px;border-radius:8px;background:var(--azul);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+.barra{background:#fff;display:flex;align-items:center;border-bottom:1px solid var(--borde)}
+.idioma{flex:1;text-align:center;padding:14px 8px;font-size:15px;font-weight:500;color:var(--azul);border-bottom:3px solid var(--azul)}
+.flecha{padding:0 8px;color:var(--gris);font-size:20px}
+main{flex:1;padding:12px;display:flex;flex-direction:column;gap:12px}
+.caja{background:#fff;border:1px solid var(--borde);border-radius:12px;padding:14px 16px;min-height:150px;display:flex;flex-direction:column}
+.caja .et{font-size:12px;color:var(--gris);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.texto{flex:1;font-size:22px;line-height:1.4;overflow-y:auto;max-height:32vh;word-wrap:break-word}
+#origen .texto{color:#202124}
+#destino .texto{color:var(--azul-osc)}
+.parcial{color:var(--gris);font-style:italic}
+.vacio{color:#9aa0a6}
+.linea{margin-bottom:10px}
+.panel{background:#fff;border:1px solid var(--borde);border-radius:12px;padding:12px 16px;display:flex;flex-direction:column;gap:10px}
+.panel label{font-size:12px;color:var(--gris)}
+select,input{width:100%;padding:10px;border:1px solid var(--borde);border-radius:8px;font-size:15px;background:#fff}
+.fila{display:flex;gap:8px;align-items:center}
+.fila button{white-space:nowrap}
+button.sec{background:#fff;border:1px solid var(--borde);color:var(--azul);border-radius:8px;padding:10px 12px;font-size:14px;font-weight:500}
+#estado{text-align:center;font-size:14px;color:var(--gris);min-height:20px}
+#error{display:none;background:#fce8e6;color:var(--rojo);border-radius:8px;padding:10px 14px;font-size:14px}
+.mic-zona{position:sticky;bottom:0;background:linear-gradient(transparent,var(--fondo) 30%);padding:12px 0 18px;display:flex;flex-direction:column;align-items:center;gap:8px}
+#mic{width:76px;height:76px;border-radius:50%;border:none;background:var(--azul);color:#fff;font-size:32px;box-shadow:0 3px 10px rgba(26,115,232,.45);transition:.2s}
+#mic.activo{background:var(--rojo);box-shadow:0 0 0 0 rgba(217,48,37,.6);animation:pulso 1.4s infinite}
+@keyframes pulso{0%{box-shadow:0 0 0 0 rgba(217,48,37,.55)}70%{box-shadow:0 0 0 20px rgba(217,48,37,0)}100%{box-shadow:0 0 0 0 rgba(217,48,37,0)}}
+.nivel{width:160px;height:5px;background:var(--borde);border-radius:3px;overflow:hidden}
+#nivelBarra{height:100%;width:0;background:var(--verde);transition:width .08s}
+summary{font-size:14px;color:var(--azul);font-weight:500;padding:4px 0}
+</style>
+</head>
+<body>
+<header><div class="icono">T</div><h1><b>Traductor</b> en vivo</h1></header>
+<div class="barra"><div class="idioma">INGLÉS</div><div class="flecha">→</div><div class="idioma">ESPAÑOL</div></div>
+
+<main>
+<div id="error"></div>
+
+<div class="caja" id="origen"><div class="et">Inglés (lo que escucho)</div><div class="texto" id="txtOrigen"><span class="vacio">Pulsa el micrófono y habla en inglés…</span></div></div>
+<div class="caja" id="destino"><div class="et">Español (traducción)</div><div class="texto" id="txtDestino"><span class="vacio">La traducción aparecerá aquí</span></div></div>
+
+<details class="panel" id="ajustes" open>
+<summary>Ajustes</summary>
+<div><label>Micrófono</label>
+<div class="fila"><select id="selMic"></select><button class="sec" id="btnRefrescar">Actualizar</button></div></div>
+<div><label>Clave de ElevenLabs (reconoce la voz)</label><input type="password" id="claveEL" placeholder="sk_..." autocomplete="off"></div>
+<div><label>Clave de Anthropic (traduce)</label><input type="password" id="claveAN" placeholder="sk-ant-..." autocomplete="off"></div>
+<div><label>Voz en español (traducción hablada)</label>
+<select id="selVoz"></select></div>
+<div class="fila"><label style="flex:1;font-size:14px;color:#202124"><input type="checkbox" id="chkHablar" checked style="width:auto;margin-right:8px">Leer la traducción en voz alta</label></div>
+</details>
+</main>
+
+<div class="mic-zona">
+<div id="estado">Listo</div>
+<div class="nivel"><div id="nivelBarra"></div></div>
+<button id="mic" aria-label="Micrófono">🎤</button>
+</div>
+
+<script>
+(function(){
+'use strict';
+var $=function(id){return document.getElementById(id)};
+var el={mic:$('mic'),estado:$('estado'),error:$('error'),selMic:$('selMic'),selVoz:$('selVoz'),claveEL:$('claveEL'),claveAN:$('claveAN'),txtO:$('txtOrigen'),txtD:$('txtDestino'),nivel:$('nivelBarra'),hablar:$('chkHablar'),refrescar:$('btnRefrescar'),ajustes:$('ajustes')};
+
+var ws=null,stream=null,ctx=null,proc=null,fuente=null,escuchando=false;
+var colaTrad=[],traduciendo=false,colaAudio=[],sonando=false,audioActual=null;
+var MODELO_AN='claude-sonnet-4-5';
+var MODELO_STT='scribe_v2_realtime';
+var MODELO_TTS='eleven_flash_v2_5';
+
+// ---------- utilidades ----------
+function mostrarError(m){el.error.textContent=m;el.error.style.display='block';console.error(m)}
+function limpiarError(){el.error.style.display='none'}
+function setEstado(t){el.estado.textContent=t}
+function guardar(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function leer(k){try{return localStorage.getItem(k)||''}catch(e){return ''}}
+
+el.claveEL.value=leer('t1_el');el.claveAN.value=leer('t1_an');
+el.claveEL.onchange=function(){guardar('t1_el',el.claveEL.value.trim())};
+el.claveAN.onchange=function(){guardar('t1_an',el.claveAN.value.trim())};
+el.hablar.checked=leer('t1_hablar')!=='no';
+el.hablar.onchange=function(){guardar('t1_hablar',el.hablar.checked?'si':'no')};
+
+// ---------- micrófonos ----------
+function listarMics(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices){mostrarError('Este navegador no permite elegir micrófono.');return Promise.resolve()}
+  return navigator.mediaDevices.enumerateDevices().then(function(ds){
+    var mics=ds.filter(function(d){return d.kind==='audioinput'});
+    var previo=leer('t1_mic');
+    el.selMic.innerHTML='';
+    var o0=document.createElement('option');o0.value='';o0.textContent='Automático (por defecto)';el.selMic.appendChild(o0);
+    mics.forEach(function(d,i){
+      var o=document.createElement('option');o.value=d.deviceId;
+      o.textContent=d.label||('Micrófono '+(i+1));
+      el.selMic.appendChild(o);
+    });
+    if(previo&&mics.some(function(d){return d.deviceId===previo})){el.selMic.value=previo}
+  }).catch(function(e){mostrarError('No pude listar los micrófonos: '+e.message)});
+}
+el.selMic.onchange=function(){guardar('t1_mic',el.selMic.value);if(escuchando){parar();setTimeout(iniciar,300)}};
+el.refrescar.onclick=function(){
+  navigator.mediaDevices.getUserMedia({audio:true}).then(function(s){s.getTracks().forEach(function(t){t.stop()});return listarMics()}).catch(function(e){mostrarError('Permiso de micrófono denegado: '+e.message)});
+};
+if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){navigator.mediaDevices.addEventListener('devicechange',listarMics)}
+listarMics();
+
+// ---------- voces ----------
+var VOCES_POR_DEFECTO=[{voice_id:'EXAVITQu4vr4xnSDxMaL',name:'Sarah (mujer)'},{voice_id:'JBFqnCBsd6RMkjVDRZzb',name:'George (hombre)'},{voice_id:'XrExE9yKIg1WjnnlVkGX',name:'Matilda (mujer)'}];
+function llenarVoces(lista){
+  var prev=leer('t1_voz')||'';
+  el.selVoz.innerHTML='';
+  lista.forEach(function(v){var o=document.createElement('option');o.value=v.voice_id;o.textContent=v.name;el.selVoz.appendChild(o)});
+  if(prev&&lista.some(function(v){return v.voice_id===prev})){el.selVoz.value=prev}
+}
+llenarVoces(VOCES_POR_DEFECTO);
+el.selVoz.onchange=function(){guardar('t1_voz',el.selVoz.value)};
+
+// ---------- pantalla ----------
+var lineasOrigen=[],lineasDestino=[],parcial='';
+function pintarOrigen(){
+  if(!lineasOrigen.length&&!parcial){el.txtO.innerHTML='<span class="vacio">Pulsa el micrófono y habla en inglés…</span>';return}
+  var h=lineasOrigen.slice(-6).map(function(t){return '<div class="linea">'+esc(t)+'</div>'}).join('');
+  if(parcial)h+='<div class="linea parcial">'+esc(parcial)+'</div>';
+  el.txtO.innerHTML=h;el.txtO.scrollTop=el.txtO.scrollHeight;
+}
+function pintarDestino(){
+  if(!lineasDestino.length){el.txtD.innerHTML='<span class="vacio">La traducción aparecerá aquí</span>';return}
+  el.txtD.innerHTML=lineasDestino.slice(-6).map(function(t){return '<div class="linea">'+esc(t)+'</div>'}).join('');
+  el.txtD.scrollTop=el.txtD.scrollHeight;
+}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+
+// ---------- filtro: solo inglés claro ----------
+var PALABRAS_ES=/\b(el|la|los|las|de|que|y|en|un|una|es|por|con|para|no|se|lo|como|más|pero|su|al|muy|está|esto|esta|yo|tú|usted|qué|cuando|donde|también|porque|hay|ser|tiene|todo|bien|gracias|hola)\b/gi;
+var PALABRAS_EN=/\b(the|and|is|are|was|were|to|of|in|that|it|for|you|we|they|this|with|have|has|on|not|but|be|at|your|what|can|will|just|so|do|from|my|me|i|a|an|if|or|there|about|get|go|going|know|think|because)\b/gi;
+function esIngles(t,idioma,prob){
+  var s=t.trim();
+  if(s.length<3)return false;
+  if(!/[a-zA-Z]{2}/.test(s))return false;
+  if(idioma&&idioma.toLowerCase().indexOf('en')!==0&&idioma.toLowerCase()!=='eng'){return false}
+  var es=(s.match(PALABRAS_ES)||[]).length;
+  var en=(s.match(PALABRAS_EN)||[]).length;
+  if(/[áéíóúñ¿¡]/i.test(s)&&es>=en)return false;
+  if(es>en)return false;
+  var palabras=s.split(/\s+/).length;
+  if(palabras<2&&en===0)return false;
+  return true;
+}
+
+// ---------- traducción con Claude ----------
+function encolarTraduccion(texto){colaTrad.push(texto);procesarTrad()}
+function procesarTrad(){
+  if(traduciendo||!colaTrad.length)return;
+  traduciendo=true;
+  var texto=colaTrad.shift();
+  var clave=el.claveAN.value.trim();
+  if(!clave){mostrarError('Falta la clave de Anthropic.');traduciendo=false;return}
+  var contexto=lineasOrigen.slice(-4,-1).join(' ');
+  fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'content-type':'application/json','x-api-key':clave,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({
+      model:MODELO_AN,max_tokens:600,temperature:0.2,
+      system:'Eres un intérprete profesional simultáneo de inglés a español neutro. Recibes una frase transcrita automáticamente del inglés. Tradúcela de forma natural, fiel y fluida, como la diría un hablante nativo de español, conservando el tono y el sentido. Corrige mentalmente errores evidentes de transcripción usando el contexto. Responde SOLO con la traducción, sin comillas, sin explicaciones ni notas. Si el texto no es inglés comprensible, es ruido, o es una palabra suelta sin sentido, responde exactamente: [IGNORAR]. Nunca inventes contenido que no esté en el texto.',
+      messages:[{role:'user',content:(contexto?'Contexto previo (no traducir): '+contexto+'\n\n':'')+'Frase a traducir: '+texto}]
+    })
+  }).then(function(r){
+    return r.json().then(function(j){
+      if(!r.ok){throw new Error((j&&j.error&&j.error.message)||('Error '+r.status))}
+      return j;
+    });
+  }).then(function(j){
+    var out=(j.content&&j.content[0]&&j.content[0].text||'').trim();
+    if(out&&out.indexOf('[IGNORAR]')===-1){
+      lineasDestino.push(out);pintarDestino();
+      if(el.hablar.checked)encolarAudio(out);
+    }
+  }).catch(function(e){
+    mostrarError('Error al traducir: '+e.message);
+  }).then(function(){traduciendo=false;procesarTrad()});
+}
+
+// ---------- voz hablada en cola ----------
+function encolarAudio(texto){colaAudio.push(texto);reproducir()}
+function reproducir(){
+  if(sonando||!colaAudio.length)return;
+  sonando=true;
+  var texto=colaAudio.shift();
+  var clave=el.claveEL.value.trim();
+  var voz=el.selVoz.value||VOCES_POR_DEFECTO[0].voice_id;
+  fetch('https://api.elevenlabs.io/v1/text-to-speech/'+voz+'?output_format=mp3_44100_64',{
+    method:'POST',
+    headers:{'xi-api-key':clave,'content-type':'application/json'},
+    body:JSON.stringify({text:texto,model_id:MODELO_TTS,language_code:'es'})
+  }).then(function(r){
+    if(!r.ok){return r.text().then(function(t){throw new Error('ElevenLabs voz '+r.status+': '+t.slice(0,120))})}
+    return r.blob();
+  }).then(function(b){
+    var url=URL.createObjectURL(b);
+    audioActual=new Audio(url);
+    var fin=function(){URL.revokeObjectURL(url);audioActual=null;sonando=false;reproducir()};
+    audioActual.onended=fin;audioActual.onerror=fin;
+    return audioActual.play().catch(function(e){mostrarError('No pude reproducir el audio: '+e.message);fin()});
+  }).catch(function(e){mostrarError(e.message);sonando=false;reproducir()});
+}
+
+// ---------- reconocimiento con ElevenLabs (tiempo real) ----------
+function pedirTokenEL(clave){
+  return fetch('https://api.elevenlabs.io/v1/single-use-token/realtime_scribe',{method:'POST',headers:{'xi-api-key':clave}}).then(function(r){
+    if(!r.ok){return r.text().then(function(t){throw new Error('ElevenLabs token '+r.status+': '+t.slice(0,140))})}
+    return r.json();
+  }).then(function(j){return j.token});
+}
+
+function f32aPCM16Base64(f32){
+  var buf=new ArrayBuffer(f32.length*2),v=new DataView(buf);
+  for(var i=0;i<f32.length;i++){var s=Math.max(-1,Math.min(1,f32[i]));v.setInt16(i*2,s<0?s*0x8000:s*0x7FFF,true)}
+  var b=new Uint8Array(buf),bin='';
+  for(var j=0;j<b.length;j+=0x8000){bin+=String.fromCharCode.apply(null,b.subarray(j,j+0x8000))}
+  return btoa(bin);
+}
+
+function iniciar(){
+  limpiarError();
+  var clEL=el.claveEL.value.trim(),clAN=el.claveAN.value.trim();
+  if(!clEL){mostrarError('Falta la clave de ElevenLabs. Pégala en Ajustes.');el.ajustes.open=true;return}
+  if(!clAN){mostrarError('Falta la clave de Anthropic. Pégala en Ajustes.');el.ajustes.open=true;return}
+  guardar('t1_el',clEL);guardar('t1_an',clAN);
+  setEstado('Conectando…');
+  var constraints={audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}};
+  if(el.selMic.value){constraints.audio.deviceId={exact:el.selMic.value}}
+  var tokenProm=pedirTokenEL(clEL);
+  var micProm=navigator.mediaDevices.getUserMedia(constraints);
+  Promise.all([tokenProm,micProm]).then(function(r){
+    var token=r[0];stream=r[1];
+    listarMics();
+    var AC=window.AudioContext||window.webkitAudioContext;
+    ctx=new AC({sampleRate:16000});
+    var url='wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id='+MODELO_STT+'&language_code=en&audio_format=pcm_16000&commit_strategy=vad&vad_silence_threshold_secs=0.9&token='+encodeURIComponent(token);
+    ws=new WebSocket(url);
+    ws.onopen=function(){
+      escuchando=true;el.mic.classList.add('activo');setEstado('Escuchando inglés…');
+      fuente=ctx.createMediaStreamSource(stream);
+      proc=ctx.createScriptProcessor(4096,1,1);
+      proc.onaudioprocess=function(e){
+        if(!ws||ws.readyState!==1)return;
+        var d=e.inputBuffer.getChannelData(0);
+        var suma=0;for(var i=0;i<d.length;i++){suma+=d[i]*d[i]}
+        var rms=Math.sqrt(suma/d.length);
+        el.nivel.style.width=Math.min(100,rms*400)+'%';
+        ws.send(JSON.stringify({message_type:'input_audio_chunk',audio_base_64:f32aPCM16Base64(d),sample_rate:16000}));
+      };
+      fuente.connect(proc);proc.connect(ctx.destination);
+    };
+    ws.onmessage=function(ev){
+      var m;try{m=JSON.parse(ev.data)}catch(e){return}
+      var tipo=m.message_type;
+      if(tipo==='partial_transcript'){
+        parcial=m.text||'';pintarOrigen();
+      }else if(tipo==='committed_transcript'||tipo==='committed_transcript_with_timestamps'){
+        parcial='';
+        var t=(m.text||'').trim();
+        if(t&&esIngles(t,m.language_code)){lineasOrigen.push(t);pintarOrigen();encolarTraduccion(t)}
+        else{pintarOrigen()}
+      }else if(tipo&&tipo.indexOf('error')!==-1||m.error){
+        mostrarError('ElevenLabs: '+(m.error||m.message||tipo));
+      }
+    };
+    ws.onerror=function(){mostrarError('Error de conexión con ElevenLabs. Revisa la clave y tu internet.')};
+    ws.onclose=function(){if(escuchando){parar();setEstado('Conexión cerrada. Pulsa el micrófono para reiniciar.')}};
+  }).catch(function(e){
+    var msg=e&&e.message?e.message:String(e);
+    if(e&&e.name==='NotAllowedError')msg='Permiso de micrófono denegado. Actívalo en los ajustes del navegador.';
+    if(e&&e.name==='NotFoundError'||e&&e.name==='OverconstrainedError')msg='No encuentro ese micrófono. Pulsa Actualizar y elige otro.';
+    mostrarError(msg);parar();
+  });
+}
+
+function parar(){
+  escuchando=false;
+  try{if(ws&&ws.readyState===1){ws.send(JSON.stringify({message_type:'input_audio_chunk',audio_base_64:'',commit:true,sample_rate:16000}))}}catch(e){}
+  try{if(ws)ws.close()}catch(e){}ws=null;
+  try{if(proc){proc.disconnect();proc.onaudioprocess=null}}catch(e){}proc=null;
+  try{if(fuente)fuente.disconnect()}catch(e){}fuente=null;
+  try{if(stream)stream.getTracks().forEach(function(t){t.stop()})}catch(e){}stream=null;
+  try{if(ctx)ctx.close()}catch(e){}ctx=null;
+  el.mic.classList.remove('activo');el.nivel.style.width='0';
+  setEstado('Listo');
+}
+
+el.mic.onclick=function(){escuchando?parar():iniciar()};
+
+if('wakeLock' in navigator){
+  document.addEventListener('visibilitychange',function(){
+    if(escuchando&&document.visibilityState==='visible'){navigator.wakeLock.request('screen').catch(function(){})}
+  });
+}
+})();
+</script>
+</body>
+</html>
